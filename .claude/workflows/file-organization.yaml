@@ -1,0 +1,336 @@
+name: file-organization
+description: Automatically organize documentation files into proper directory structure with standardized naming
+version: 1.0.0
+
+inputs:
+  file_path:
+    type: string
+    description: Path to file that needs organization (relative or absolute)
+    required: false
+
+  project_root:
+    type: string
+    description: Project root directory (defaults to current working directory)
+    required: false
+    default: "."
+
+  document_type:
+    type: string
+    description: Document type (auto-detected if not provided)
+    enum: [implementation, specification, analysis, report, planning, grant, presentation, publication, administrative]
+    required: false
+
+  batch_mode:
+    type: boolean
+    description: Organize all .md/.txt files in project root
+    default: false
+
+  dry_run:
+    type: boolean
+    description: Preview changes without moving files
+    default: false
+
+outputs:
+  organized_files:
+    type: array
+    description: List of files that were organized
+
+  classification_results:
+    type: object
+    description: Classification details for each file
+
+  directory_structure:
+    type: object
+    description: Created directory structure
+
+  updated_references:
+    type: array
+    description: Files where cross-references were updated
+
+  memory_updates:
+    type: array
+    description: Patterns stored in memory MCP
+
+steps:
+  # Step 1: Initialize and validate
+  - id: initialize
+    name: Initialize Workflow
+    type: task
+    description: Validate inputs and set up working environment
+    inputs:
+      file_path: ${inputs.file_path}
+      project_root: ${inputs.project_root}
+      batch_mode: ${inputs.batch_mode}
+    outputs:
+      files_to_process:
+        type: array
+        description: List of files to organize
+      working_directory:
+        type: string
+        description: Validated project root path
+    logic: |
+      - If file_path provided, process single file
+      - If batch_mode=true, find all .md/.txt files in project root
+      - Exclude whitelisted files: README.md, QUICK_START.md, LICENSE, .gitignore, CHANGELOG.md, CONTRIBUTING.md
+      - Validate project_root exists and is accessible
+
+  # Step 2: Analyze content and classify
+  - id: analyze_and_classify
+    name: Analyze Content and Classify Documents
+    type: task
+    description: Read file content and determine document type using classification rules
+    dependencies: [initialize]
+    inputs:
+      files_to_process: ${steps.initialize.outputs.files_to_process}
+      document_type_override: ${inputs.document_type}
+    outputs:
+      classifications:
+        type: object
+        description: Map of filename to classification details
+    logic: |
+      For each file:
+        1. Read first 100 lines of content
+        2. Query memory MCP for similar past classifications
+        3. Extract keywords (PHASE, IMPLEMENTATION, SPEC, ANALYSIS, etc.)
+        4. Count keyword occurrences by category
+        5. Check content indicators (tense, structure, format)
+        6. Determine confidence level (high/medium/low)
+        7. If document_type_override provided, use it (confidence=manual)
+        8. If confidence < 50%, default to analysis category
+        9. Store classification details
+
+      Classification keywords by type:
+      - Implementation: PHASE, IMPLEMENTATION, COMPLETE, MIGRATION, SETUP, DEPLOYMENT
+      - Specification: SPECIFICATION, SPEC, STRATEGY, REQUIREMENTS, ARCHITECTURE
+      - Analysis: ANALYSIS, ASSESSMENT, EVALUATION, REVIEW, CRITIQUE
+      - Report: REPORT, TEST, RESULTS, METRICS, SUMMARY, STATUS
+      - Planning: PLAN, ROADMAP, TODO, TIMELINE, SCHEDULE
+      - Grant: GRANT, DFG, EU, HORIZON, FUNDING, PROPOSAL
+      - Presentation: PRESENTATION, SLIDES, TALK, CONFERENCE
+      - Publication: PAPER, MANUSCRIPT, PUBLICATION, JOURNAL
+      - Administrative: ADMIN, SOP, POLICY, PROCEDURE, QUARTERLY
+
+  # Step 3: Generate new filenames
+  - id: generate_filenames
+    name: Generate Standardized Filenames
+    type: task
+    description: Create new filenames following naming conventions
+    dependencies: [analyze_and_classify]
+    inputs:
+      classifications: ${steps.analyze_and_classify.outputs.classifications}
+    outputs:
+      filename_mappings:
+        type: object
+        description: Map of old filename to new filename and location
+    logic: |
+      For each classified file:
+        1. Extract existing date from filename (if any) or use current date
+        2. Determine type abbreviation based on classification
+        3. Clean description:
+           - Remove ALL_CAPS patterns
+           - Remove redundant words (COMPLETE, REPORT, SPECIFICATION, etc.)
+           - Convert to lowercase-kebab-case
+           - Remove special characters except hyphens
+        4. Determine if date prefix needed:
+           - Implementation: YES (one-time reports)
+           - Specification: NO (unless versioned)
+           - Analysis: YES (snapshot in time)
+           - Report: YES (time-bound)
+           - Planning: NO (unless versioned)
+        5. Assemble filename: [YYYY-MM-DD_]type_description.md
+        6. Determine target location: docs/{category}/
+
+      Type abbreviations:
+      - implementation → impl
+      - specification → spec
+      - analysis → analysis
+      - report → report
+      - planning → planning
+      - grant → grant
+      - presentation → presentation
+      - publication → publication
+      - administrative → admin
+
+  # Step 4: Ensure directory structure
+  - id: ensure_structure
+    name: Create Directory Structure
+    type: task
+    description: Verify docs/ subdirectories exist, create if missing
+    dependencies: [generate_filenames]
+    inputs:
+      filename_mappings: ${steps.generate_filenames.outputs.filename_mappings}
+      project_root: ${steps.initialize.outputs.working_directory}
+      dry_run: ${inputs.dry_run}
+    outputs:
+      created_directories:
+        type: array
+        description: List of directories created
+    logic: |
+      1. Extract unique target directories from filename_mappings
+      2. For each directory:
+         - Check if exists
+         - If not exists and not dry_run: create directory
+         - Track which directories were created
+
+      Standard directories:
+      - docs/implementation/
+      - docs/specifications/
+      - docs/analysis/
+      - docs/reports/
+      - docs/planning/
+
+      Extended directories (MDC Platform):
+      - docs/grants/
+      - docs/presentations/
+      - docs/publications/
+      - docs/administrative/
+
+  # Step 5: Move files
+  - id: move_files
+    name: Move Files to Organized Locations
+    type: task
+    description: Move files to their proper locations
+    dependencies: [ensure_structure]
+    inputs:
+      filename_mappings: ${steps.generate_filenames.outputs.filename_mappings}
+      dry_run: ${inputs.dry_run}
+    outputs:
+      moved_files:
+        type: array
+        description: List of successfully moved files
+      failed_moves:
+        type: array
+        description: Files that failed to move with error details
+    logic: |
+      For each file in filename_mappings:
+        1. Verify source file exists
+        2. Check target location doesn't already have file with same name
+        3. If dry_run: log intended move, skip actual move
+        4. If not dry_run:
+           - Move file to new location with new name
+           - Verify move succeeded
+           - Track success/failure
+        5. Log all operations for reporting
+
+  # Step 6: Update cross-references
+  - id: update_references
+    name: Update Cross-References
+    type: task
+    description: Find and update references to moved files
+    dependencies: [move_files]
+    inputs:
+      filename_mappings: ${steps.generate_filenames.outputs.filename_mappings}
+      project_root: ${steps.initialize.outputs.working_directory}
+      dry_run: ${inputs.dry_run}
+    outputs:
+      updated_files:
+        type: array
+        description: Files where references were updated
+      reference_count:
+        type: integer
+        description: Total number of references updated
+    logic: |
+      For each moved file:
+        1. Extract old filename (without path)
+        2. Search project for references using grep:
+           - Look in .md files
+           - Look for markdown links: [text](old-filename)
+           - Look for direct mentions: old-filename
+        3. For each file with references:
+           - Calculate relative path from file to new location
+           - If dry_run: log intended updates
+           - If not dry_run: update references using Edit tool
+        4. Track which files were updated and how many references changed
+
+  # Step 7: Store patterns in memory
+  - id: store_in_memory
+    name: Store Classification Patterns in Memory MCP
+    type: task
+    description: Save classification decisions to memory for future learning
+    dependencies: [analyze_and_classify, generate_filenames, move_files]
+    inputs:
+      classifications: ${steps.analyze_and_classify.outputs.classifications}
+      filename_mappings: ${steps.generate_filenames.outputs.filename_mappings}
+      moved_files: ${steps.move_files.outputs.moved_files}
+      dry_run: ${inputs.dry_run}
+    outputs:
+      memory_entries:
+        type: array
+        description: Patterns stored in memory
+    logic: |
+      For each successfully moved file:
+        1. Create memory entry:
+           - original_filename
+           - detected_keywords (list)
+           - classification (type)
+           - new_filename
+           - new_location
+           - confidence (high/medium/low)
+           - timestamp (ISO 8601)
+        2. If not dry_run: store in memory MCP
+        3. Track stored entries for reporting
+
+      This enables the system to learn from past decisions and improve
+      future classifications by recognizing similar patterns.
+
+  # Step 8: Generate report
+  - id: generate_report
+    name: Generate Organization Report
+    type: task
+    description: Create summary report of all operations
+    dependencies: [move_files, update_references, store_in_memory]
+    inputs:
+      files_to_process: ${steps.initialize.outputs.files_to_process}
+      classifications: ${steps.analyze_and_classify.outputs.classifications}
+      moved_files: ${steps.move_files.outputs.moved_files}
+      failed_moves: ${steps.move_files.outputs.failed_moves}
+      updated_files: ${steps.update_references.outputs.updated_files}
+      created_directories: ${steps.ensure_structure.outputs.created_directories}
+      memory_entries: ${steps.store_in_memory.outputs.memory_entries}
+      dry_run: ${inputs.dry_run}
+    outputs:
+      report:
+        type: object
+        description: Comprehensive organization report
+    logic: |
+      Generate report with:
+      - Summary statistics (files processed, moved, failed)
+      - Table of file movements (old → new)
+      - Classification confidence levels
+      - Created directories
+      - Updated cross-references (count and files)
+      - Memory patterns stored
+      - Any warnings or errors
+      - If dry_run: mark as preview, no actual changes made
+
+# Workflow metadata
+metadata:
+  author: "Claude (administrative-automation-agent)"
+  created: "2024-11-19"
+  tags: [documentation, organization, automation, file-management]
+  category: administrative
+
+# Error handling
+error_handling:
+  on_classification_failure:
+    action: default_to_analysis
+    notify: true
+
+  on_move_failure:
+    action: skip_and_continue
+    notify: true
+
+  on_reference_update_failure:
+    action: log_and_continue
+    notify: false
+
+# Validation rules
+validation:
+  - name: no_duplicate_filenames
+    description: Ensure no two files have the same new filename
+
+  - name: preserve_whitelist
+    description: Never move whitelisted files (README, QUICK_START, etc.)
+
+  - name: valid_category
+    description: All files must map to valid category directory

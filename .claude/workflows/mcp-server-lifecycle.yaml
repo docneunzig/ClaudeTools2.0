@@ -1,0 +1,249 @@
+name: mcp-server-lifecycle
+description: Complete MCP server lifecycle workflow - from discovery to deployment
+version: 1.0.0
+
+inputs:
+  user_request:
+    type: string
+    description: User's request that triggered the workflow
+    required: true
+
+  force_generate:
+    type: boolean
+    description: Force generation of new server even if one exists
+    default: false
+
+  validation_level:
+    type: string
+    description: Validation level (quick, standard, comprehensive)
+    default: standard
+    enum: [quick, standard, comprehensive]
+
+  auto_deploy:
+    type: boolean
+    description: Automatically deploy if validation passes
+    default: true
+
+outputs:
+  server_name:
+    type: string
+    description: Name of the server (existing or generated)
+
+  server_status:
+    type: string
+    description: Status (discovered, generated, deployed, failed)
+
+  tools:
+    type: array
+    description: List of available tools
+
+  deployment_info:
+    type: object
+    description: Deployment details and next steps
+
+steps:
+  # Step 1: Analyze user intent
+  - id: analyze_intent
+    name: Analyze User Intent
+    type: task
+    description: Parse user request to understand what MCP capability is needed
+    inputs:
+      request: ${{ inputs.user_request }}
+    outputs:
+      - keywords
+      - capabilities_needed
+      - tools_needed
+    depends_on: []
+
+  # Step 2: Search for existing servers
+  - id: search_existing
+    name: Search Existing Servers
+    type: task
+    description: Use mcp-discovery skill to find matching servers
+    skill: mcp-discovery
+    inputs:
+      intent: ${{ inputs.user_request }}
+      keywords: ${{ steps.analyze_intent.outputs.keywords }}
+    outputs:
+      - matched_servers
+      - confidence_scores
+      - suggestions
+    depends_on: [analyze_intent]
+
+  # Step 3: Decision - use existing or generate new
+  - id: decide_action
+    name: Decide Action
+    type: decision
+    description: Determine if existing server is sufficient or new one needed
+    condition: |
+      ${{ inputs.force_generate }} == false &&
+      len(${{ steps.search_existing.outputs.matched_servers }}) > 0 &&
+      ${{ steps.search_existing.outputs.confidence_scores[0] }} >= 0.7
+    branches:
+      use_existing:
+        steps: [load_existing, validate_existing, deploy_existing]
+      generate_new:
+        steps: [gather_requirements, generate_server, validate_generated, deploy_generated]
+    depends_on: [search_existing]
+
+  # Branch A: Use Existing Server
+  - id: load_existing
+    name: Load Existing Server
+    type: task
+    description: Load configuration for best matching server
+    skill: mcp-configurator
+    inputs:
+      server_name: ${{ steps.search_existing.outputs.matched_servers[0] }}
+    outputs:
+      - server_config
+      - server_tools
+    depends_on: [decide_action]
+    condition: ${{ steps.decide_action.branch }} == "use_existing"
+
+  - id: validate_existing
+    name: Validate Existing Server
+    type: task
+    description: Quick health check on existing server
+    skill: mcp-validator
+    inputs:
+      server_name: ${{ steps.load_existing.outputs.server_config.name }}
+      level: quick
+    outputs:
+      - validation_result
+      - health_status
+    depends_on: [load_existing]
+    condition: ${{ steps.decide_action.branch }} == "use_existing"
+
+  - id: deploy_existing
+    name: Deploy Existing Server
+    type: task
+    description: Ensure existing server is enabled and accessible
+    skill: mcp-deployer
+    inputs:
+      server_name: ${{ steps.load_existing.outputs.server_config.name }}
+      action: enable
+    outputs:
+      - deployment_status
+      - next_steps
+    depends_on: [validate_existing]
+    condition: ${{ steps.decide_action.branch }} == "use_existing"
+
+  # Branch B: Generate New Server
+  - id: gather_requirements
+    name: Gather Requirements
+    type: task
+    description: Collect requirements for new server
+    skill: mcp-generator
+    action: gather_requirements
+    inputs:
+      user_request: ${{ inputs.user_request }}
+      capabilities_needed: ${{ steps.analyze_intent.outputs.capabilities_needed }}
+      tools_needed: ${{ steps.analyze_intent.outputs.tools_needed }}
+    outputs:
+      - server_spec
+      - tier
+      - tool_schemas
+    depends_on: [decide_action]
+    condition: ${{ steps.decide_action.branch }} == "generate_new"
+
+  - id: generate_server
+    name: Generate Server
+    type: task
+    description: Generate MCP server from specifications
+    skill: mcp-generator
+    action: generate
+    inputs:
+      spec: ${{ steps.gather_requirements.outputs.server_spec }}
+      tier: ${{ steps.gather_requirements.outputs.tier }}
+      tools: ${{ steps.gather_requirements.outputs.tool_schemas }}
+    outputs:
+      - server_name
+      - server_path
+      - generated_files
+    depends_on: [gather_requirements]
+    condition: ${{ steps.decide_action.branch }} == "generate_new"
+
+  - id: validate_generated
+    name: Validate Generated Server
+    type: task
+    description: Comprehensive validation of generated server
+    skill: mcp-validator
+    inputs:
+      server_name: ${{ steps.generate_server.outputs.server_name }}
+      server_path: ${{ steps.generate_server.outputs.server_path }}
+      level: ${{ inputs.validation_level }}
+    outputs:
+      - validation_result
+      - test_results
+      - recommendations
+    depends_on: [generate_server]
+    condition: ${{ steps.decide_action.branch }} == "generate_new"
+
+  - id: deploy_generated
+    name: Deploy Generated Server
+    type: task
+    description: Deploy newly generated server
+    skill: mcp-deployer
+    inputs:
+      server_name: ${{ steps.generate_server.outputs.server_name }}
+      server_path: ${{ steps.generate_server.outputs.server_path }}
+      auto_register: true
+    outputs:
+      - deployment_status
+      - deployment_report
+      - next_steps
+    depends_on: [validate_generated]
+    condition: |
+      ${{ steps.decide_action.branch }} == "generate_new" &&
+      ${{ inputs.auto_deploy }} == true &&
+      ${{ steps.validate_generated.outputs.validation_result.overall_pass }} == true
+
+  # Final step: Report results
+  - id: report_results
+    name: Report Results
+    type: task
+    description: Generate final report for user
+    inputs:
+      branch: ${{ steps.decide_action.branch }}
+      existing_server: ${{ steps.load_existing.outputs.server_config if branch == "use_existing" else null }}
+      generated_server: ${{ steps.generate_server.outputs if branch == "generate_new" else null }}
+      deployment: |
+        ${{ steps.deploy_existing.outputs if branch == "use_existing"
+            else steps.deploy_generated.outputs }}
+    outputs:
+      - final_report
+    depends_on: [deploy_existing, deploy_generated]
+
+# Error handling
+on_error:
+  - id: rollback
+    name: Rollback on Failure
+    type: task
+    description: Rollback changes if deployment fails
+    skill: mcp-deployer
+    action: rollback
+    inputs:
+      server_name: ${{ steps.generate_server.outputs.server_name or steps.load_existing.outputs.server_config.name }}
+      reason: ${{ error.message }}
+
+  - id: report_failure
+    name: Report Failure
+    type: task
+    description: Generate failure report with recovery suggestions
+    inputs:
+      error: ${{ error }}
+      step_failed: ${{ error.step }}
+    outputs:
+      - failure_report
+      - recovery_suggestions
+
+# Cleanup
+on_complete:
+  - id: cleanup
+    name: Cleanup
+    type: task
+    description: Clean up temporary files and update cache
+    actions:
+      - invalidate_discovery_cache
+      - cleanup_temp_files
+      - update_usage_stats
